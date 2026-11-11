@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+PyJWT
+pwdlib[argon2]
+python-dotenv
+email-validator
