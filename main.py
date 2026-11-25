@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,9 @@ from pwdlib import PasswordHash
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+
+# Kafka Producer
+from events import publish_event
 
 SECRET_KEY = os.getenv("AUTH_JWT_SECRET")
 
@@ -35,7 +38,7 @@ DB_PATH = BASE_DIR / "auth.db"
 
 app = FastAPI(
     title="MSOA - Authentication Microservice",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 password_hasher = PasswordHash.recommended()
@@ -278,6 +281,9 @@ def register(data: RegisterRequest):
             detail="Email already registered"
         )
 
+    # KAFKA : publication apres inscription reussie
+    publish_event("UserRegistered", user_id)
+
     return {
         "id": user_id,
         "name": name,
@@ -315,6 +321,9 @@ def login(data: LoginRequest):
         )
 
     token = create_token(user["id"])
+
+    # KAFKA : publication apres connexion reussie
+    publish_event("UserLoggedIn", user["id"])
 
     return {
         "user": safe_user(user),
@@ -358,20 +367,28 @@ def logout(
 
     jti = payload.get("jti")
     expires_at = payload.get("exp")
+    user_id = payload.get("sub")
 
     if jti and expires_at:
         with get_db() as db:
 
-            db.execute(
+            cursor = db.execute(
                 """INSERT OR IGNORE INTO revoked_tokens
                    (jti, expires_at) VALUES (?, ?)""",
                 (jti, int(expires_at))
             )
 
+            is_new = cursor.rowcount == 1
+
             db.execute(
                 "DELETE FROM revoked_tokens WHERE expires_at < ?",
                 (int(datetime.now(timezone.utc).timestamp()),)
             )
+
+        # KAFKA : publication uniquement lors
+        # de la premiere revocation du token
+        if is_new and user_id:
+            publish_event("UserLoggedOut", user_id)
 
     return {"success": True}
 
@@ -381,9 +398,14 @@ def logout(
 # ======================================
 
 @app.get("/")
-def home():
+def home(request: Request):
     return {
         "service": "MSOA Authentication Service",
         "status": "running",
-        "port": 8081
+        "port": request.url.port,
+        "communication": [
+            "REST",
+            "Kafka Event Streaming"
+        ],
+        "kafka_topic": "auth-events"
     }
